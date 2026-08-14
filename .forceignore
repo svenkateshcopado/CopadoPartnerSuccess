@@ -1,0 +1,3 @@
+# .forceignore
+**/profiles/**
+**/permissionsets/**
