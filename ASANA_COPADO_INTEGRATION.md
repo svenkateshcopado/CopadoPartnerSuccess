@@ -77,7 +77,7 @@ This solution creates a **bidirectional, real-time sync** between Asana tasks an
 +---------------------------------------------------------------------+
 |                  AsanaWebhookQueueable (Queueable)                  |
 |                                                                     |
-|  Allows callouts from async context. Calls AsanaWebhookProcessor.  |
+|  Allows callouts from async context. Calls AsanaWebhookProcessor.   |
 +------------------+--------------------------------------------------+
                    |
                    v
@@ -123,7 +123,7 @@ This solution creates a **bidirectional, real-time sync** between Asana tasks an
 
 ### 3.1 Custom Setting: `Asana_Integration_Settings__c`
 
-**Type:** Hierarchy Custom Setting  
+**Type:** Hierarchy Custom Setting
 **Purpose:** Stores org-wide configuration for the integration. All sensitive and environment-specific values live here so they never need to be hard-coded or committed to source control.
 
 | Field | API Name | Type | Purpose |
@@ -159,9 +159,9 @@ This solution creates a **bidirectional, real-time sync** between Asana tasks an
 |---|---|---|---|---|
 | Title Mapping | `name` | `copado__User_Story_Title__c` | Both | Plain text, no translation needed |
 | Description | `notes` | `copado__Technical_Specifications__c` | Both | Plain text, no translation needed |
-| Completion status | Custom field GID | `copado__Status__c` | Both | Requires your Asana enum GIDs in Value_Map |
-| Status Inbound Mapping | `completed` | `copado__Status__c` | Inbound | Fallback: maps boolean true/false to Copado status |
-| Status Outbound Mapping | `completed` | `copado__Status__c` | Outbound | Maps Copado status labels to Asana completed boolean |
+| Completion status | Custom field GID | `copado__Status__c` | Both | Requires your Asana enum GIDs in Value_Map. This is the single source of truth for status sync |
+
+> **Note:** Status sync is handled exclusively by the `Completion status` record using Asana's custom field GID and a JSON value map. This correctly translates rich Copado status picklist values to and from Asana enum options in both directions.
 
 ---
 
@@ -188,7 +188,7 @@ This solution creates a **bidirectional, real-time sync** between Asana tasks an
 
 ### 3.3 Custom Field: `Asana_Task_Id__c` on `copado__User_Story__c`
 
-**Type:** Text(50), External ID, Unique  
+**Type:** Text(50), External ID, Unique
 **Purpose:** This is the bridge between systems. It stores the Asana task GID on the Copado User Story. All upserts use this field as the external ID key, which means:
 - If a User Story with that GID exists, it gets updated.
 - If not, a new User Story is created.
@@ -199,8 +199,8 @@ This solution creates a **bidirectional, real-time sync** between Asana tasks an
 ### 3.4 Apex Classes
 
 #### `AsanaWebhookEndpoint`
-**Type:** `@RestResource` global class  
-**URL:** `/asana/webhook/*`  
+**Type:** `@RestResource` global class
+**URL:** `/asana/webhook/*`
 **Purpose:** The public-facing HTTP endpoint that Asana calls when tasks are created or changed.
 
 **Responsibilities:**
@@ -211,13 +211,13 @@ This solution creates a **bidirectional, real-time sync** between Asana tasks an
 ---
 
 #### `AsanaWebhookQueueable`
-**Type:** `Queueable`, `Database.AllowsCallouts`  
+**Type:** `Queueable`, `Database.AllowsCallouts`
 **Purpose:** A thin async wrapper. Salesforce does not allow HTTP callouts directly from a synchronous REST context. This class bridges that gap by running the actual API call in an async queue job.
 
 ---
 
 #### `AsanaWebhookProcessor`
-**Type:** Regular Apex class (called from Queueable)  
+**Type:** Regular Apex class (called from Queueable)
 **Purpose:** The core inbound sync engine. Handles everything for a single Asana task.
 
 **Step-by-step flow:**
@@ -230,13 +230,13 @@ This solution creates a **bidirectional, real-time sync** between Asana tasks an
 7. Applies the custom field filter: skips the task if the named field does not match the expected value.
 8. Resolves the Copado record type by checking tags first, then `resource_subtype`, then falling back to the default.
 9. Iterates each field mapping. For custom field GIDs (numeric), it digs into the `custom_fields` array. For standard fields, it reads directly from the task JSON.
-10. If a `Value_Map__c` JSON is present, it translates the Asana value to the Copado label. Otherwise it casts the value to the correct field type.
+10. If a `Value_Map__c` JSON is present, it translates the Asana enum GID to the Copado picklist label. Otherwise it casts the value to the correct field type.
 11. Upserts the `copado__User_Story__c` record using `Asana_Task_Id__c` as the external ID.
 
 ---
 
 #### `AsanaOutboundSync`
-**Type:** Regular Apex class with `@future(callout=true)`  
+**Type:** Regular Apex class with `@future(callout=true)`
 **Purpose:** The core outbound sync engine. Pushes Copado User Story changes back to Asana.
 
 **Step-by-step flow:**
@@ -252,7 +252,7 @@ This solution creates a **bidirectional, real-time sync** between Asana tasks an
 ---
 
 #### `AsanaTaskSync`
-**Type:** Regular Apex class with `@InvocableMethod` and `@future(callout=true)`  
+**Type:** Regular Apex class with `@InvocableMethod` and `@future(callout=true)`
 **Purpose:** Bulk inbound sync. Pulls all tasks from the configured Asana project and upserts them as User Stories.
 
 **When to use:**
@@ -263,7 +263,7 @@ This solution creates a **bidirectional, real-time sync** between Asana tasks an
 ---
 
 #### `AsanaSyncScheduler`
-**Type:** `Schedulable`  
+**Type:** `Schedulable`
 **Purpose:** Runs the bulk sync on a schedule. Invokes the `Asana_To_Copado_Sync` Flow, which in turn calls `AsanaTaskSync`.
 
 **To schedule (run in Anonymous Apex):**
@@ -275,7 +275,7 @@ This runs every day at 2:00 AM.
 ---
 
 #### `AsanaWebhookRegistration`
-**Type:** Regular Apex class (run once via Anonymous Apex)  
+**Type:** Regular Apex class (run once via Anonymous Apex)
 **Purpose:** Registers the Salesforce Site URL as a webhook target with the Asana API. After successful registration, saves the returned webhook GID to the Custom Setting.
 
 **Run once:**
@@ -287,7 +287,7 @@ Before running, update the `targetUrl` variable in the class body with your actu
 ---
 
 #### `AsanaDiagnostic`
-**Type:** Regular Apex class with `@InvocableMethod` and `@future(callout=true)`  
+**Type:** Regular Apex class with `@InvocableMethod` and `@future(callout=true)`
 **Purpose:** Full health check of the integration. Run this any time after setup or when something seems wrong.
 
 **What it checks:**
@@ -306,7 +306,7 @@ Then check the debug logs.
 ---
 
 #### `AsanaWebhookEndpointTest` and `AsanaWebhookProcessorTest`
-**Type:** `@isTest` classes  
+**Type:** `@isTest` classes
 **Purpose:** Apex unit test coverage. Covers webhook handshake, task event parsing, field type mapping, value map translation, record type resolution, filter logic, and error paths. Combined coverage is 88%+ across all classes.
 
 ---
@@ -319,23 +319,24 @@ Then check the debug logs.
 Asana Task Created/Changed
         |
         v
-Asana sends POST to Salesforce Site URL (/asana/webhook/*)
+Asana sends POST to Salesforce Site URL
+(/asana/webhook/*)
         |
         v
 AsanaWebhookEndpoint receives request
-  +-- If X-Hook-Secret header present:
-  |     Save secret to Custom Setting
-  |     Echo header back --> Asana confirms webhook
-  |     Return 200
-  +-- Else:
-        Parse events array
-        Extract task GIDs (skip removed/deleted)
-        Enqueue AsanaWebhookQueueable for each GID
-        Return 200 immediately
+  +- If X-Hook-Secret header present:
+  |    Save secret to Custom Setting
+  |    Echo header back --> Asana confirms webhook
+  |    Return 200
+  +- Else:
+       Parse events array
+       Extract task GIDs (skip removed/deleted)
+       Enqueue AsanaWebhookQueueable for each GID
+       Return 200 immediately
         |
         v
 AsanaWebhookQueueable.execute()
-  --> Calls AsanaWebhookProcessor.processTaskEvent(gid)
+  +- Calls AsanaWebhookProcessor.processTaskEvent(gid)
         |
         v
 AsanaWebhookProcessor
@@ -355,7 +356,7 @@ Schedule fires (or admin triggers from Flow)
         |
         v
 AsanaSyncScheduler.execute()
-  --> Starts Asana_To_Copado_Sync Flow
+  +- Starts Asana_To_Copado_Sync Flow
         |
         v
 Flow calls AsanaTaskSync (InvocableMethod)
@@ -364,10 +365,10 @@ Flow calls AsanaTaskSync (InvocableMethod)
 AsanaTaskSync.doSync()
   1. GET /projects/{gid}/tasks?opt_fields=...
   2. Loop each task
-     +-- Apply tag filter
-     +-- Apply custom field filter
-     +-- Resolve record type
-     +-- Build User Story with mapped fields
+     +- Apply tag filter
+     +- Apply custom field filter
+     +- Resolve record type
+     +- Build User Story with mapped fields
   3. Bulk upsert all matching stories
 ```
 
@@ -378,7 +379,8 @@ User edits Copado User Story
         |
         v
 Flow or Trigger fires
-  --> Calls AsanaOutboundSync.updateAsanaTask(asanaTaskId, userStoryId)
+  +- Calls AsanaOutboundSync.updateAsanaTask(
+         asanaTaskId, userStoryId)
         |
         v (@future callout)
 AsanaOutboundSync
@@ -397,25 +399,23 @@ AsanaOutboundSync
 The field mapping system is entirely driven by `Asana_Field_Mapping__mdt` records. No code changes are needed to add new fields.
 
 ### Standard Asana Fields (text key)
-Fields like `name`, `notes`, `completed` are mapped by their Asana API key name.
+Fields like `name` and `notes` are mapped by their Asana API key name.
 
-```json
-{
-  "Asana_Field_API_Name__c": "name",
-  "Copado_Field_API_Name__c": "copado__User_Story_Title__c",
-  "Field_Type__c": "Text",
-  "Direction__c": "Both",
-  "Value_Map__c": null
-}
+```
+Asana_Field_API_Name__c  = "name"
+Copado_Field_API_Name__c = "copado__User_Story_Title__c"
+Field_Type__c            = "Text"
+Direction__c             = "Both"
+Value_Map__c             = null
 ```
 
 ### Asana Custom Fields (numeric GID)
-When `Asana_Field_API_Name__c` is a numeric string (e.g. `1234567890123456`), the processor knows it is a custom field GID and looks it up in the `custom_fields` array of the task response.
+When `Asana_Field_API_Name__c` is a numeric string (e.g. `1234567890123456`), the processor knows it is a custom field GID and looks it up in the `custom_fields` array of the task response. This is how status sync works via the `Completion status` mapping record.
 
 ### Value Map (JSON Translation)
 The `Value_Map__c` field accepts a JSON object where keys are Asana values and values are Copado labels (for inbound). On outbound, the map is automatically reversed.
 
-**Example:**
+**Example (Completion status):**
 ```json
 {
   "ENUM_GID_NOT_STARTED": "Not started",
@@ -424,8 +424,8 @@ The `Value_Map__c` field accepts a JSON object where keys are Asana values and v
 }
 ```
 
-- **Inbound:** Asana sends `ENUM_GID_IN_PROGRESS` --> Copado stores `In progress`
-- **Outbound:** Copado has `In progress` --> Asana receives `ENUM_GID_IN_PROGRESS`
+**Inbound:** Asana sends `ENUM_GID_IN_PROGRESS` --> Copado stores `In progress`
+**Outbound:** Copado has `In progress` --> Asana receives `ENUM_GID_IN_PROGRESS`
 
 ### Adding a New Field Mapping
 1. Go to Setup > Custom Metadata Types > Asana Field Mapping > Manage Records.
@@ -440,13 +440,13 @@ The `Value_Map__c` field accepts a JSON object where keys are Asana values and v
 
 The processor resolves the Copado User Story record type in priority order:
 
-**Priority 1: Task Tags**  
+**Priority 1: Task Tags**
 If the task has a tag whose name (lowercase) matches an `Asana_Task_Value__c` in an active, non-default mapping, that record type is used.
 
-**Priority 2: Resource Subtype**  
+**Priority 2: Resource Subtype**
 If no tag matches, the task's `resource_subtype` (e.g. `milestone`, `default_task`) is checked against the same mappings.
 
-**Priority 3: Default**  
+**Priority 3: Default**
 If nothing matches, the mapping with `Is_Default__c = true` is used.
 
 ---
@@ -536,7 +536,7 @@ sf project deploy start --source-dir force-app --target-org my-org
 In Setup, search for Named Credentials and create one with the values in Section 9.
 
 ### Step 5: Create the Salesforce Site
-In Setup, search for Sites. Create a new Site named `AsanaIntegration`. Once active, go to the Site guest user profile and add `AsanaWebhookEndpoint` to the enabled Apex classes.
+In Setup, search for Sites. Create a new Site named `AsanaIntegration`. Once active, go to the Site's guest user profile and add `AsanaWebhookEndpoint` to the enabled Apex classes.
 
 ### Step 6: Configure the Custom Setting
 In Setup > Custom Settings > Asana Integration Settings > Manage, create a new Org Default record and fill in:
@@ -573,7 +573,7 @@ In Setup > Custom Metadata Types > Asana Field Mapping > Manage Records, open th
 - [ ] `AsanaWebhookRegistration.registerWebhook()` executed successfully
 - [ ] `Webhook_GID__c` is populated in the Custom Setting (auto-set by registration)
 - [ ] `Webhook_Secret__c` is populated (auto-set on first Asana ping)
-- [ ] `Completion status` CMDT record updated with real Asana GIDs
+- [ ] `Completion status` CMDT record updated with real Asana custom field GID and enum option GIDs
 - [ ] Record type developer names in `Asana_Record_Type_Mapping__mdt` match your org
 - [ ] Diagnostic run confirms setup: `AsanaDiagnostic.runAsync()`
 - [ ] (Optional) Outbound trigger or Flow created to call `AsanaOutboundSync.updateAsanaTask()`
@@ -587,7 +587,7 @@ In Setup > Custom Metadata Types > Asana Field Mapping > Manage Records, open th
 |---|---|---|
 | Webhook is registered but no User Stories are created | Site guest user cannot access the endpoint | Add `AsanaWebhookEndpoint` to the Site guest user's enabled Apex classes |
 | `Webhook_Secret__c` is empty | Asana never confirmed the webhook | Re-run `registerWebhook()` and check the debug log for HTTP status |
-| Tasks are coming in but wrong status value | Value_Map GIDs are placeholders | Update `Completion status` CMDT record with real Asana enum GIDs |
+| Tasks are coming in but wrong status value | Value_Map GIDs in `Completion status` CMDT are placeholders | Update the record with real Asana enum option GIDs |
 | All tasks are skipped | Tag or custom field filter is set but does not match | Check filter values in Custom Setting or clear them to sync all tasks |
 | Record type is always default | Tag names in CMDT do not match actual Asana tag names | Check the exact tag name (case-insensitive but spelling must match) |
 | Outbound sync does nothing | No trigger/Flow calling `updateAsanaTask()` | Create a Flow on User Story update that calls the Apex action |
