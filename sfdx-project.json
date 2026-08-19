@@ -2,9 +2,13 @@
   "packageDirectories": [
     {
       "path": "force-app",
-      "default": true
+      "default": true,
+      "package": "Asana Copado Integration",
+      "versionName": "Version 1.0",
+      "versionNumber": "1.0.0.NEXT"
     }
   ],
+  "name": "Asana Copado Integration",
   "namespace": "",
   "sfdcLoginUrl": "https://login.salesforce.com",
   "sourceApiVersion": "59.0"
