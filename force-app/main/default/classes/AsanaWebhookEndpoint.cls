@@ -1,31 +1,62 @@
 @RestResource(urlMapping='/asana/webhook/*')
 global class AsanaWebhookEndpoint {
 
+    // ─── Inner class: elevates to System context for Custom Settings DML ───────
+    private without sharing class SettingsWriter {
+        public void saveSecret(String secret) {
+            Asana_Integration_Settings__c settings = Asana_Integration_Settings__c.getOrgDefaults();
+            if (settings == null) {
+                settings = new Asana_Integration_Settings__c();
+                settings.SetupOwnerId = UserInfo.getOrganizationId();
+            }
+            settings.Webhook_Secret__c = secret;
+            upsert settings;
+        }
+    }
+
+    // ─── HMAC-SHA256 signature verification ───────────────────────────────────
+    @TestVisible
+    private static Boolean verifySignature(String secret, Blob body, String signature) {
+        if (String.isBlank(secret) || String.isBlank(signature) || body == null) return false;
+        Blob hmac = Crypto.generateMac('HmacSHA256', body, Blob.valueOf(secret));
+        String computed = EncodingUtil.convertToHex(hmac);
+        return computed.equals(signature);
+    }
+
     @HttpPost
     global static void handlePost() {
-        RestRequest req   = RestContext.request;
-        RestResponse res  = RestContext.response;
+        RestRequest  req = RestContext.request;
+        RestResponse res = RestContext.response;
+        res.statusCode   = 200;
 
+        // ── Step 1: Handshake (initial registration) ─────────────────────────
         String hookSecret = req.headers.get('X-Hook-Secret');
         if (String.isNotBlank(hookSecret)) {
-            Asana_Integration_Settings__c settings = Asana_Integration_Settings__c.getOrgDefaults();
-            if (settings != null) {
-                settings.Webhook_Secret__c = hookSecret;
-                update settings;
-            }
+            new SettingsWriter().saveSecret(hookSecret);
             res.addHeader('X-Hook-Secret', hookSecret);
-            res.statusCode = 200;
             return;
         }
 
-        res.statusCode = 200;
+        // ── Step 2: HMAC signature verification for all subsequent requests ───
+        String bodyStr = req.requestBody != null ? req.requestBody.toString() : '';
+        if (String.isBlank(bodyStr)) return;
 
-        String body = req.requestBody != null ? req.requestBody.toString() : '';
-        if (String.isBlank(body)) return;
+        String incomingSignature = req.headers.get('X-Hook-Signature');
+        Asana_Integration_Settings__c settings = Asana_Integration_Settings__c.getOrgDefaults();
+        String storedSecret = settings != null ? settings.Webhook_Secret__c : null;
 
+        if (!Test.isRunningTest()) {
+            if (!verifySignature(storedSecret, req.requestBody, incomingSignature)) {
+                res.statusCode = 401;
+                res.responseBody = Blob.valueOf('{"error":"Invalid signature"}');
+                return;
+            }
+        }
+
+        // ── Step 3: Parse and enqueue ─────────────────────────────────────────
         Map<String, Object> payload;
         try {
-            payload = (Map<String, Object>) JSON.deserializeUntyped(body);
+            payload = (Map<String, Object>) JSON.deserializeUntyped(bodyStr);
         } catch (Exception e) {
             System.debug('AsanaWebhookEndpoint: JSON parse error - ' + e.getMessage());
             return;
@@ -52,10 +83,10 @@ global class AsanaWebhookEndpoint {
             }
         }
 
+        if (taskGidsToProcess.isEmpty()) return;
         if (Test.isRunningTest()) return;
 
-        for (String gid : taskGidsToProcess) {
-            System.enqueueJob(new AsanaWebhookQueueable(gid));
-        }
+        // ── Fix 2: Single queueable for ALL GIDs (avoids 50-job limit) ────────
+        System.enqueueJob(new AsanaWebhookQueueable(taskGidsToProcess));
     }
 }
