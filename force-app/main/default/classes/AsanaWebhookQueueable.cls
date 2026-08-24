@@ -1,9 +1,15 @@
 public class AsanaWebhookQueueable implements Queueable, Database.AllowsCallouts {
-    private String taskGid;
-    public AsanaWebhookQueueable(String taskGid) {
-        this.taskGid = taskGid;
+
+    private Set<String> taskGids;
+
+    // ── New constructor: accepts a full Set of GIDs ───────────────────────────
+    public AsanaWebhookQueueable(Set<String> taskGids) {
+        this.taskGids = taskGids;
     }
+
     public void execute(QueueableContext context) {
-        AsanaWebhookProcessor.processTaskEvent(taskGid);
+        for (String gid : taskGids) {
+            AsanaWebhookProcessor.processTaskEvent(gid);
+        }
     }
 }
