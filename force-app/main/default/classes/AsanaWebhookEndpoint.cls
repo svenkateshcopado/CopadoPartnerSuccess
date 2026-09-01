@@ -14,7 +14,7 @@ global class AsanaWebhookEndpoint {
         }
     }
 
-    // ─── HMAC-SHA256 signature verification ───────────────────────────────────
+    // ─── HMAC-SHA256 signature verification ───────────────────────────────────────────────────────────────────────
     @TestVisible
     private static Boolean verifySignature(String secret, Blob body, String signature) {
         if (String.isBlank(secret) || String.isBlank(signature) || body == null) return false;
@@ -29,7 +29,7 @@ global class AsanaWebhookEndpoint {
         RestResponse res = RestContext.response;
         res.statusCode   = 200;
 
-        // ── Step 1: Handshake (initial registration) ─────────────────────────
+        // ── Step 1: Handshake (initial registration) ─────────────────────────────────────────────────────────
         String hookSecret = req.headers.get('X-Hook-Secret');
         if (String.isNotBlank(hookSecret)) {
             new SettingsWriter().saveSecret(hookSecret);
@@ -53,7 +53,7 @@ global class AsanaWebhookEndpoint {
             }
         }
 
-        // ── Step 3: Parse and enqueue ─────────────────────────────────────────
+        // ── Step 3: Parse and enqueue ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
         Map<String, Object> payload;
         try {
             payload = (Map<String, Object>) JSON.deserializeUntyped(bodyStr);
@@ -86,7 +86,7 @@ global class AsanaWebhookEndpoint {
         if (taskGidsToProcess.isEmpty()) return;
         if (Test.isRunningTest()) return;
 
-        // ── Fix 2: Single queueable for ALL GIDs (avoids 50-job limit) ────────
+        // ── Fix 2: Single queueable for ALL GIDs (avoids 50-job limit) ────────────────────────
         System.enqueueJob(new AsanaWebhookQueueable(taskGidsToProcess));
     }
 }

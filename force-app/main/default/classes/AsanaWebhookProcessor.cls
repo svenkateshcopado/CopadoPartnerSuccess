@@ -77,12 +77,14 @@ public class AsanaWebhookProcessor {
         String gid = (String) task.get('gid');
         if (String.isBlank(gid)) return;
 
+        // Skip empty/untitled tasks - do not sync to Copado
         String taskName = task.containsKey('name') ? String.valueOf(task.get('name')) : '';
         if (String.isBlank(taskName)) {
             System.debug('AsanaWebhookProcessor: Skipping task ' + gid + ' - empty name, not syncing to Copado.');
             return;
         }
 
+        // Build a lookup map of custom fields by GID for efficient access
         Map<String, Object> customFieldByGid = new Map<String, Object>();
         Object cfListObj = task.get('custom_fields');
         if (cfListObj instanceof List<Object>) {
@@ -151,16 +153,22 @@ public class AsanaWebhookProcessor {
         us.put('Asana_Task_Id__c', gid);
         if (resolvedRecordTypeId != null) us.RecordTypeId = resolvedRecordTypeId;
 
+        // Track which Copado fields have already been set to avoid duplicate mapping overwrites
         Set<String> mappedCopadoFields = new Set<String>();
 
         for (Asana_Field_Mapping__mdt m : fieldMappings) {
+            // Skip if this Copado field was already set by a higher-priority mapping
             if (mappedCopadoFields.contains(m.Copado_Field_API_Name__c)) continue;
 
             Object rawValue;
+
+            // Check if the Asana field API name is a numeric GID (custom field)
             Boolean isCustomFieldGid = m.Asana_Field_API_Name__c.isNumeric();
 
             if (isCustomFieldGid && customFieldByGid.containsKey(m.Asana_Field_API_Name__c)) {
+                // Extract value from the custom_fields array using the GID lookup map
                 Map<String, Object> cf = (Map<String, Object>) customFieldByGid.get(m.Asana_Field_API_Name__c);
+                // Prefer enum_value GID for enum fields, fall back to display_value, then text_value
                 if (cf.containsKey('enum_value') && cf.get('enum_value') != null) {
                     Map<String, Object> enumVal = (Map<String, Object>) cf.get('enum_value');
                     rawValue = enumVal.containsKey('gid') ? enumVal.get('gid') : null;
@@ -172,6 +180,7 @@ public class AsanaWebhookProcessor {
                     rawValue = cf.get('display_value');
                 }
             } else {
+                // Standard top-level task field
                 rawValue = task.get(m.Asana_Field_API_Name__c);
             }
 

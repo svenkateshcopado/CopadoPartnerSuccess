@@ -1,11 +1,13 @@
 @IsTest
 private class AsanaWebhookEndpointTest {
 
-    // ── Mock HTTP callout for AsanaWebhookProcessor ───────────────────────────
+    // ── Mock HTTP callout for AsanaWebhookProcessor ───────────────────────────────────────────────────────────────────────────────────
     private class AsanaMockHttpResponse implements HttpCalloutMock {
         public HTTPResponse respond(HTTPRequest req) {
             HttpResponse res = new HttpResponse();
             res.setHeader('Content-Type', 'application/json');
+            // Return a minimal valid task payload with an empty name
+            // so processTaskEvent exits early without DML (no SOQL limit issues)
             res.setBody('{"data":{"gid":"gid001","name":"","resource_subtype":"default_task","tags":[],"custom_fields":[]}}');
             res.setStatusCode(200);
             return res;
@@ -21,7 +23,7 @@ private class AsanaWebhookEndpointTest {
         insert s;
     }
 
-    // ── 1. Handshake: X-Hook-Secret must be echoed back ──────────────────────
+    // ── 1. Handshake: X-Hook-Secret must be echoed back ──────────────────────────────────────────────────────────────
     @IsTest
     static void testHandshake() {
         RestRequest req = new RestRequest();
@@ -41,7 +43,7 @@ private class AsanaWebhookEndpointTest {
         System.assertEquals('mysecret123', res.headers.get('X-Hook-Secret'));
     }
 
-    // ── 2. Valid task event: processes correctly ──────────────────────────────
+    // ── 2. Valid task event: processes correctly ──────────────────────────────────────────────────────────────────────────────────────────
     @IsTest
     static void testValidTaskEvent() {
         RestRequest req = new RestRequest();
@@ -70,7 +72,7 @@ private class AsanaWebhookEndpointTest {
         System.assertEquals(200, res.statusCode);
     }
 
-    // ── 3. Invalid HMAC: verifySignature returns false ────────────────────────
+    // ── 3. Invalid HMAC: verifySignature returns false ────────────────────────────────────────────────────────────────────────────────────
     @IsTest
     static void testInvalidSignatureRejected() {
         String storedSecret = 'test_secret_abc';
@@ -84,7 +86,7 @@ private class AsanaWebhookEndpointTest {
         System.assertEquals(false, result, 'Invalid signature should fail verification');
     }
 
-    // ── 4. Valid HMAC: verifySignature returns true ───────────────────────────
+    // ── 4. Valid HMAC: verifySignature returns true ───────────────────────────────────────────────────────────────────────────────────────
     @IsTest
     static void testValidSignatureAccepted() {
         String secret = 'test_secret_abc';
@@ -98,7 +100,7 @@ private class AsanaWebhookEndpointTest {
         System.assertEquals(true, result, 'Valid signature should pass verification');
     }
 
-    // ── 5. Deleted task events are skipped ───────────────────────────────────
+    // ── 5. Deleted task events are skipped ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
     @IsTest
     static void testDeletedTaskSkipped() {
         RestRequest req = new RestRequest();
@@ -127,7 +129,7 @@ private class AsanaWebhookEndpointTest {
         System.assertEquals(200, res.statusCode);
     }
 
-    // ── 6. Empty body returns 200 gracefully ─────────────────────────────────
+    // ── 6. Empty body returns 200 gracefully ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
     @IsTest
     static void testEmptyBody() {
         RestRequest req = new RestRequest();
@@ -145,7 +147,7 @@ private class AsanaWebhookEndpointTest {
         System.assertEquals(200, res.statusCode);
     }
 
-    // ── 7. Multiple GIDs collapse into a single queueable ────────────────────
+    // ── 7. Multiple GIDs collapse into a single queueable ────────────────────────────────────────────────────────────────────────────
     @IsTest
     static void testMultipleGidsSingleQueueable() {
         RestRequest req = new RestRequest();
@@ -173,7 +175,7 @@ private class AsanaWebhookEndpointTest {
         System.assertEquals(200, res.statusCode);
     }
 
-    // ── 8. AsanaWebhookQueueable execute() body covered via mock callout ──────
+    // ── 8. AsanaWebhookQueueable execute() body covered via mock callout ──────────────────────
     @IsTest
     static void testQueueableExecuteCovered() {
         Test.setMock(HttpCalloutMock.class, new AsanaMockHttpResponse());
