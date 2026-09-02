@@ -1,7 +1,17 @@
 public class AsanaWebhookProcessor {
 
+    // Alphanumeric-only GID validation pattern
+    private static final Pattern GID_PATTERN = Pattern.compile('[a-zA-Z0-9]+');
+
     public static void processTaskEvent(String taskGid) {
         if (String.isBlank(taskGid)) return;
+
+        // Validate GID format before using in callout URL
+        Matcher m = GID_PATTERN.matcher(taskGid);
+        if (!m.matches()) {
+            System.debug('AsanaWebhookProcessor: Invalid GID format, aborting - ' + taskGid);
+            return;
+        }
 
         Asana_Integration_Settings__c settings = Asana_Integration_Settings__c.getOrgDefaults();
         if (settings == null || String.isBlank(settings.Asana_PAT__c)) {
@@ -50,8 +60,8 @@ public class AsanaWebhookProcessor {
             'custom_fields.enum_value.gid','custom_fields.text_value',
             'custom_fields.number_value'
         };
-        for (Asana_Field_Mapping__mdt m : fieldMappings) {
-            asanaFields.add(m.Asana_Field_API_Name__c);
+        for (Asana_Field_Mapping__mdt fm : fieldMappings) {
+            asanaFields.add(fm.Asana_Field_API_Name__c);
         }
         String optFields = String.join(new List<String>(asanaFields), ',');
 
@@ -77,136 +87,98 @@ public class AsanaWebhookProcessor {
         String gid = (String) task.get('gid');
         if (String.isBlank(gid)) return;
 
-        // Skip empty/untitled tasks - do not sync to Copado
         String taskName = task.containsKey('name') ? String.valueOf(task.get('name')) : '';
         if (String.isBlank(taskName)) {
-            System.debug('AsanaWebhookProcessor: Skipping task ' + gid + ' - empty name, not syncing to Copado.');
+            System.debug('AsanaWebhookProcessor: Skipping task ' + gid + ' - empty name.');
             return;
         }
 
-        // Build a lookup map of custom fields by GID for efficient access
-        Map<String, Object> customFieldByGid = new Map<String, Object>();
-        Object cfListObj = task.get('custom_fields');
-        if (cfListObj instanceof List<Object>) {
-            for (Object cfItem : (List<Object>) cfListObj) {
-                Map<String, Object> cf = (Map<String, Object>) cfItem;
-                if (cf.containsKey('gid')) {
-                    customFieldByGid.put(String.valueOf(cf.get('gid')), cf);
-                }
-            }
+        // Build custom fields lookup map
+        Map<String, String> customFieldMap = new Map<String, String>();
+        List<Object> cfList = task.containsKey('custom_fields') ? (List<Object>) task.get('custom_fields') : new List<Object>();
+        for (Object cfObj : cfList) {
+            Map<String, Object> cf = (Map<String, Object>) cfObj;
+            String cfName = cf.containsKey('name') ? String.valueOf(cf.get('name')) : '';
+            String cfVal  = cf.containsKey('display_value') && cf.get('display_value') != null
+                ? String.valueOf(cf.get('display_value')) : '';
+            if (String.isNotBlank(cfName)) customFieldMap.put(cfName, cfVal);
         }
 
-        List<String> tagNames = new List<String>();
-        Object tagsObj = task.get('tags');
-        if (tagsObj instanceof List<Object>) {
-            for (Object tagObj : (List<Object>) tagsObj) {
-                Map<String, Object> tagMap = (Map<String, Object>) tagObj;
-                if (tagMap.containsKey('name')) {
-                    tagNames.add(String.valueOf(tagMap.get('name')).toLowerCase());
-                }
-            }
-        }
-
+        // Tag filter check
+        List<Object> tags = task.containsKey('tags') ? (List<Object>) task.get('tags') : new List<Object>();
         if (String.isNotBlank(filterTag)) {
-            Boolean hasTag = false;
-            for (String t : tagNames) {
-                if (t.equalsIgnoreCase(filterTag.trim())) { hasTag = true; break; }
-            }
-            if (!hasTag) {
-                System.debug('AsanaWebhookProcessor: Skipping task ' + gid + ' - missing tag: ' + filterTag);
-                return;
-            }
-        }
-
-        if (String.isNotBlank(filterFieldName) && String.isNotBlank(filterFieldValue)) {
-            Boolean fieldMatches = false;
-            Object cfObj = task.get('custom_fields');
-            if (cfObj instanceof List<Object>) {
-                for (Object cfItem : (List<Object>) cfObj) {
-                    Map<String, Object> cf = (Map<String, Object>) cfItem;
-                    String cfName = cf.containsKey('name') ? String.valueOf(cf.get('name')) : '';
-                    String cfVal  = cf.containsKey('display_value') && cf.get('display_value') != null
-                                    ? String.valueOf(cf.get('display_value')) : '';
-                    if (cfName.equalsIgnoreCase(filterFieldName.trim()) && cfVal.equalsIgnoreCase(filterFieldValue.trim())) {
-                        fieldMatches = true; break;
-                    }
+            Boolean tagFound = false;
+            for (Object tagObj : tags) {
+                Map<String, Object> tag = (Map<String, Object>) tagObj;
+                if (filterTag.equalsIgnoreCase(String.valueOf(tag.get('name')))) {
+                    tagFound = true;
+                    break;
                 }
             }
-            if (!fieldMatches) {
-                System.debug('AsanaWebhookProcessor: Skipping task ' + gid + ' - custom field filter not matched.');
+            if (!tagFound) {
+                System.debug('AsanaWebhookProcessor: Task ' + gid + ' skipped - tag filter not matched.');
                 return;
             }
         }
 
-        Id resolvedRecordTypeId = defaultRecordTypeId;
-        for (String tagName : tagNames) {
-            if (rtMap.containsKey(tagName)) { resolvedRecordTypeId = rtMap.get(tagName); break; }
-        }
-        if (resolvedRecordTypeId == defaultRecordTypeId) {
-            String subtype = task.containsKey('resource_subtype') ? String.valueOf(task.get('resource_subtype')).toLowerCase() : '';
-            if (String.isNotBlank(subtype) && rtMap.containsKey(subtype)) {
-                resolvedRecordTypeId = rtMap.get(subtype);
+        // Custom field filter check
+        if (String.isNotBlank(filterFieldName) && String.isNotBlank(filterFieldValue)) {
+            String actualVal = customFieldMap.get(filterFieldName);
+            if (!filterFieldValue.equalsIgnoreCase(actualVal)) {
+                System.debug('AsanaWebhookProcessor: Task ' + gid + ' skipped - custom field filter not matched.');
+                return;
             }
         }
 
+        // Determine record type
+        Id resolvedRecordTypeId = defaultRecordTypeId;
+        String subtype = task.containsKey('resource_subtype') ? String.valueOf(task.get('resource_subtype')).toLowerCase() : '';
+        if (rtMap.containsKey(subtype)) resolvedRecordTypeId = rtMap.get(subtype);
+        for (Object tagObj : tags) {
+            Map<String, Object> tag = (Map<String, Object>) tagObj;
+            String tagName = String.valueOf(tag.get('name')).toLowerCase();
+            if (rtMap.containsKey(tagName)) {
+                resolvedRecordTypeId = rtMap.get(tagName);
+                break;
+            }
+        }
+
+        // Build User Story record
         copado__User_Story__c us = new copado__User_Story__c();
-        us.put('Asana_Task_Id__c', gid);
+        us.Asana_Task_ID__c = gid;
+        us.copado__User_Story_Title__c = taskName;
         if (resolvedRecordTypeId != null) us.RecordTypeId = resolvedRecordTypeId;
 
-        // Track which Copado fields have already been set to avoid duplicate mapping overwrites
-        Set<String> mappedCopadoFields = new Set<String>();
+        // Apply field mappings
+        for (Asana_Field_Mapping__mdt mapping : fieldMappings) {
+            String asanaFieldName = mapping.Asana_Field_API_Name__c;
+            String copadoFieldName = mapping.Copado_Field_API_Name__c;
+            String fieldType = mapping.Field_Type__c;
+            String valueMap = mapping.Value_Map__c;
 
-        for (Asana_Field_Mapping__mdt m : fieldMappings) {
-            // Skip if this Copado field was already set by a higher-priority mapping
-            if (mappedCopadoFields.contains(m.Copado_Field_API_Name__c)) continue;
+            Object rawVal = task.containsKey(asanaFieldName) ? task.get(asanaFieldName) : customFieldMap.get(asanaFieldName);
+            if (rawVal == null) continue;
 
-            Object rawValue;
+            String strVal = String.valueOf(rawVal);
 
-            // Check if the Asana field API name is a numeric GID (custom field)
-            Boolean isCustomFieldGid = m.Asana_Field_API_Name__c.isNumeric();
-
-            if (isCustomFieldGid && customFieldByGid.containsKey(m.Asana_Field_API_Name__c)) {
-                // Extract value from the custom_fields array using the GID lookup map
-                Map<String, Object> cf = (Map<String, Object>) customFieldByGid.get(m.Asana_Field_API_Name__c);
-                // Prefer enum_value GID for enum fields, fall back to display_value, then text_value
-                if (cf.containsKey('enum_value') && cf.get('enum_value') != null) {
-                    Map<String, Object> enumVal = (Map<String, Object>) cf.get('enum_value');
-                    rawValue = enumVal.containsKey('gid') ? enumVal.get('gid') : null;
-                } else if (cf.containsKey('text_value') && cf.get('text_value') != null) {
-                    rawValue = cf.get('text_value');
-                } else if (cf.containsKey('number_value') && cf.get('number_value') != null) {
-                    rawValue = cf.get('number_value');
-                } else if (cf.containsKey('display_value') && cf.get('display_value') != null) {
-                    rawValue = cf.get('display_value');
-                }
-            } else {
-                // Standard top-level task field
-                rawValue = task.get(m.Asana_Field_API_Name__c);
+            if (String.isNotBlank(valueMap)) {
+                Map<String, Object> vm = (Map<String, Object>) JSON.deserializeUntyped(valueMap);
+                if (vm.containsKey(strVal)) strVal = String.valueOf(vm.get(strVal));
             }
 
-            if (rawValue == null) continue;
-
-            if (String.isNotBlank(m.Value_Map__c)) {
-                Map<String, Object> valueMap = (Map<String, Object>) JSON.deserializeUntyped(m.Value_Map__c);
-                String rawStr = String.valueOf(rawValue);
-                if (valueMap.containsKey(rawStr)) {
-                    us.put(m.Copado_Field_API_Name__c, String.valueOf(valueMap.get(rawStr)));
-                    mappedCopadoFields.add(m.Copado_Field_API_Name__c);
-                }
-            } else {
-                if (m.Field_Type__c == 'Boolean') {
-                    us.put(m.Copado_Field_API_Name__c, Boolean.valueOf(String.valueOf(rawValue)));
-                } else if (m.Field_Type__c == 'Number') {
-                    us.put(m.Copado_Field_API_Name__c, Decimal.valueOf(String.valueOf(rawValue)));
+            try {
+                if (fieldType == 'Boolean') {
+                    us.put(copadoFieldName, strVal.equalsIgnoreCase('true') || strVal == '1');
+                } else if (fieldType == 'Number') {
+                    us.put(copadoFieldName, Decimal.valueOf(strVal));
                 } else {
-                    us.put(m.Copado_Field_API_Name__c, String.valueOf(rawValue));
+                    us.put(copadoFieldName, strVal);
                 }
-                mappedCopadoFields.add(m.Copado_Field_API_Name__c);
+            } catch (Exception ex) {
+                System.debug('AsanaWebhookProcessor: Field mapping error for ' + copadoFieldName + ' - ' + ex.getMessage());
             }
         }
 
-        Schema.SObjectField externalIdField = Schema.SObjectType.copado__User_Story__c.fields.getMap().get('Asana_Task_Id__c');
-        Database.upsert(new List<copado__User_Story__c>{us}, externalIdField, false);
-        System.debug('AsanaWebhookProcessor: Upserted User Story for task GID: ' + gid);
+        upsert us Asana_Task_ID__c;
     }
 }

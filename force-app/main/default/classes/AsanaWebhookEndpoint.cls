@@ -14,7 +14,7 @@ global class AsanaWebhookEndpoint {
         }
     }
 
-    // ─── HMAC-SHA256 signature verification ───────────────────────────────────────────────────────────────────────
+    // ─── HMAC-SHA256 signature verification ──────────────────────────────────
     @TestVisible
     private static Boolean verifySignature(String secret, Blob body, String signature) {
         if (String.isBlank(secret) || String.isBlank(signature) || body == null) return false;
@@ -29,9 +29,17 @@ global class AsanaWebhookEndpoint {
         RestResponse res = RestContext.response;
         res.statusCode   = 200;
 
-        // ── Step 1: Handshake (initial registration) ─────────────────────────────────────────────────────────
+        // ── Step 1: Handshake (initial registration) ──────────────────────────
         String hookSecret = req.headers.get('X-Hook-Secret');
         if (String.isNotBlank(hookSecret)) {
+            // Security gate: only accept the handshake if a valid PAT is already
+            // configured, preventing unauthenticated secret replacement.
+            Asana_Integration_Settings__c cfg = Asana_Integration_Settings__c.getOrgDefaults();
+            if (cfg == null || String.isBlank(cfg.Asana_PAT__c)) {
+                res.statusCode = 403;
+                res.responseBody = Blob.valueOf('{"error":"Integration not configured"}');
+                return;
+            }
             new SettingsWriter().saveSecret(hookSecret);
             res.addHeader('X-Hook-Secret', hookSecret);
             return;
@@ -53,7 +61,7 @@ global class AsanaWebhookEndpoint {
             }
         }
 
-        // ── Step 3: Parse and enqueue ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+        // ── Step 3: Parse and enqueue ─────────────────────────────────────────
         Map<String, Object> payload;
         try {
             payload = (Map<String, Object>) JSON.deserializeUntyped(bodyStr);
@@ -71,22 +79,22 @@ global class AsanaWebhookEndpoint {
             Map<String, Object> event = (Map<String, Object>) eventObj;
             String resourceType = event.containsKey('resource') ?
                 String.valueOf(((Map<String, Object>) event.get('resource')).get('resource_type')) : '';
-            if (resourceType != 'task') continue;
-
             String action = event.containsKey('action') ? String.valueOf(event.get('action')) : '';
-            if (action == 'removed' || action == 'deleted') continue;
+
+            if (resourceType != 'task' || action == 'deleted') continue;
 
             Map<String, Object> resource = (Map<String, Object>) event.get('resource');
-            String taskGid = resource != null ? String.valueOf(resource.get('gid')) : '';
-            if (String.isNotBlank(taskGid)) {
-                taskGidsToProcess.add(taskGid);
-            }
+            String gid = resource != null ? String.valueOf(resource.get('gid')) : null;
+
+            // Validate GID: must be a non-blank alphanumeric string
+            if (String.isBlank(gid) || !Pattern.matches('[a-zA-Z0-9]+', gid)) continue;
+
+            taskGidsToProcess.add(gid);
+            if (taskGidsToProcess.size() >= 50) break;
         }
 
-        if (taskGidsToProcess.isEmpty()) return;
-        if (Test.isRunningTest()) return;
-
-        // ── Fix 2: Single queueable for ALL GIDs (avoids 50-job limit) ────────────────────────
-        System.enqueueJob(new AsanaWebhookQueueable(taskGidsToProcess));
+        if (!taskGidsToProcess.isEmpty()) {
+            System.enqueueJob(new AsanaWebhookQueueable(new List<String>(taskGidsToProcess)));
+        }
     }
 }

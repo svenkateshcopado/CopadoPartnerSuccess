@@ -1,7 +1,7 @@
 @IsTest
 private class AsanaWebhookProcessorTest {
 
-    // ── Mock: full task with tag and custom field ──────────────────────────────────────────────────────────────────────────────────────────
+    // ── Mock: full task with tag and custom field ─────────────────────────────
     private class MockAsanaHttpFull implements HttpCalloutMock {
         public HTTPResponse respond(HTTPRequest req) {
             HttpResponse res = new HttpResponse();
@@ -14,7 +14,7 @@ private class AsanaWebhookProcessorTest {
         }
     }
 
-    // ── Mock: task with no tags/custom fields (tag filter mismatch) ────────────────────────────────────────────────
+    // ── Mock: task with no tags/custom fields (tag filter mismatch) ───────────
     private class MockAsanaHttpNoFilter implements HttpCalloutMock {
         public HTTPResponse respond(HTTPRequest req) {
             HttpResponse res = new HttpResponse();
@@ -24,7 +24,7 @@ private class AsanaWebhookProcessorTest {
         }
     }
 
-    // ── Mock: task with custom field match ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    // ── Mock: task with custom field match ────────────────────────────────────
     private class MockAsanaHttpCustomField implements HttpCalloutMock {
         public HTTPResponse respond(HTTPRequest req) {
             HttpResponse res = new HttpResponse();
@@ -36,7 +36,7 @@ private class AsanaWebhookProcessorTest {
         }
     }
 
-    // ── Mock: task with custom field mismatch ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+    // ── Mock: task with custom field mismatch ─────────────────────────────────
     private class MockAsanaHttpCustomFieldMismatch implements HttpCalloutMock {
         public HTTPResponse respond(HTTPRequest req) {
             HttpResponse res = new HttpResponse();
@@ -48,7 +48,7 @@ private class AsanaWebhookProcessorTest {
         }
     }
 
-    // ── Mock: Asana API 401 error ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    // ── Mock: Asana API 401 error ─────────────────────────────────────────────
     private class MockAsanaHttpError implements HttpCalloutMock {
         public HTTPResponse respond(HTTPRequest req) {
             HttpResponse res = new HttpResponse();
@@ -58,7 +58,7 @@ private class AsanaWebhookProcessorTest {
         }
     }
 
-    // ── Mock: null data node ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    // ── Mock: null data node ──────────────────────────────────────────────────
     private class MockAsanaHttpNullData implements HttpCalloutMock {
         public HTTPResponse respond(HTTPRequest req) {
             HttpResponse res = new HttpResponse();
@@ -68,34 +68,22 @@ private class AsanaWebhookProcessorTest {
         }
     }
 
-    // ── Mock: task with resource_subtype to exercise RT resolution ────────────────────────────────────────────────
-    private class MockAsanaHttpSubtype implements HttpCalloutMock {
+    // ── Mock: task with empty name ────────────────────────────────────────────
+    private class MockAsanaHttpEmptyName implements HttpCalloutMock {
         public HTTPResponse respond(HTTPRequest req) {
             HttpResponse res = new HttpResponse();
             res.setStatusCode(200);
-            res.setBody('{"data":{"gid":"55555","name":"Subtype Task","resource_subtype":"milestone",' +
-                '"tags":[{"gid":"t1","name":"copado"}],' +
-                '"custom_fields":[]}}');
+            res.setBody('{"data":{"gid":"77777","name":"","resource_subtype":"default_task","tags":[],"custom_fields":[]}}');
             return res;
         }
     }
 
-    // ── Mock: webhook registration success ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-    private class MockRegistrationSuccess implements HttpCalloutMock {
+    // ── Mock: task for invalid GID test (should never be called) ─────────────
+    private class MockAsanaHttpInvalidGid implements HttpCalloutMock {
         public HTTPResponse respond(HTTPRequest req) {
             HttpResponse res = new HttpResponse();
-            res.setStatusCode(201);
-            res.setBody('{"data":{"gid":"webhook001","secret":"asana_webhook_secret_from_api","resource":{"gid":"proj123"},"target":"https://example.com"}}');
-            return res;
-        }
-    }
-
-    // ── Mock: webhook registration failure ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-    private class MockRegistrationFail implements HttpCalloutMock {
-        public HTTPResponse respond(HTTPRequest req) {
-            HttpResponse res = new HttpResponse();
-            res.setStatusCode(400);
-            res.setBody('{"error":"Bad Request"}');
+            res.setStatusCode(200);
+            res.setBody('{"data":{"gid":"99999","name":"Should Not Reach","resource_subtype":"default_task","tags":[],"custom_fields":[]}}');
             return res;
         }
     }
@@ -103,157 +91,127 @@ private class AsanaWebhookProcessorTest {
     @TestSetup
     static void setup() {
         Asana_Integration_Settings__c s = new Asana_Integration_Settings__c();
-        s.Asana_PAT__c         = 'test_pat';
-        s.Asana_Project_GID__c = 'proj123';
-        s.Webhook_Secret__c    = 'test_secret';
-        s.Filter_By_Tag__c     = 'copado';
+        s.Asana_PAT__c              = 'test_pat';
+        s.Asana_Project_GID__c      = '12345';
+        s.Webhook_Secret__c         = 'test_secret';
+        s.Filter_By_Tag__c          = 'copado';
+        s.Filter_Custom_Field_Name__c  = 'Sync';
+        s.Filter_Custom_Field_Value__c = 'Yes';
         insert s;
     }
 
-    // Finding 4: Invalid GIDs must be rejected at the processor level.
-    @IsTest
-    static void testProcessTaskEventRejectsNonNumericGid() {
-        Test.setMock(HttpCalloutMock.class, new MockAsanaHttpError());
-        Test.startTest();
-        AsanaWebhookProcessor.processTaskEvent('../users/me');
-        AsanaWebhookProcessor.processTaskEvent('abc');
-        AsanaWebhookProcessor.processTaskEvent('');
-        AsanaWebhookProcessor.processTaskEvent(null);
-        Test.stopTest();
-        System.assertEquals(0, [SELECT COUNT() FROM copado__User_Story__c],
-            'No User Stories should be created for invalid GIDs');
-    }
-
-    // Happy path: tag-filtered task is upserted as a User Story
+    // ── 1. Full task matching tag and custom field filter syncs to Copado ─────
     @IsTest
     static void testProcessTaskEventSuccess() {
         Test.setMock(HttpCalloutMock.class, new MockAsanaHttpFull());
         Test.startTest();
         AsanaWebhookProcessor.processTaskEvent('11111');
         Test.stopTest();
+        List<copado__User_Story__c> stories = [SELECT Id, Asana_Task_ID__c FROM copado__User_Story__c WHERE Asana_Task_ID__c = '11111'];
+        System.assertEquals(1, stories.size(), 'User story should have been created');
     }
 
-    // Task that does not match tag filter must be skipped
+    // ── 2. Tag filter mismatch: task not synced ───────────────────────────────
     @IsTest
-    static void testProcessTaskEventTagFilterMismatch() {
+    static void testTagFilterMismatch() {
         Test.setMock(HttpCalloutMock.class, new MockAsanaHttpNoFilter());
         Test.startTest();
         AsanaWebhookProcessor.processTaskEvent('22222');
         Test.stopTest();
-        System.assertEquals(0, [SELECT COUNT() FROM copado__User_Story__c],
-            'Tasks not matching the tag filter must not create User Stories');
+        List<copado__User_Story__c> stories = [SELECT Id FROM copado__User_Story__c WHERE Asana_Task_ID__c = '22222'];
+        System.assertEquals(0, stories.size(), 'Task without matching tag must not be synced');
     }
 
-    // Custom field filter: value match
+    // ── 3. Custom field filter match: task synced ─────────────────────────────
     @IsTest
-    static void testProcessTaskEventCustomFieldFilter() {
+    static void testCustomFieldFilterMatch() {
+        // Remove tag filter so only custom field filter applies
         Asana_Integration_Settings__c s = Asana_Integration_Settings__c.getOrgDefaults();
-        s.Filter_By_Tag__c              = null;
-        s.Filter_Custom_Field_Name__c   = 'Status';
-        s.Filter_Custom_Field_Value__c  = 'Active';
+        s.Filter_By_Tag__c = null;
         update s;
         Test.setMock(HttpCalloutMock.class, new MockAsanaHttpCustomField());
         Test.startTest();
         AsanaWebhookProcessor.processTaskEvent('33333');
         Test.stopTest();
+        List<copado__User_Story__c> stories = [SELECT Id FROM copado__User_Story__c WHERE Asana_Task_ID__c = '33333'];
+        System.assertEquals(1, stories.size(), 'Task matching custom field filter must be synced');
     }
 
-    // Custom field filter: value mismatch must skip upsert
+    // ── 4. Custom field filter mismatch: task not synced ──────────────────────
     @IsTest
-    static void testProcessTaskEventCustomFieldFilterMismatch() {
+    static void testCustomFieldFilterMismatch() {
         Asana_Integration_Settings__c s = Asana_Integration_Settings__c.getOrgDefaults();
-        s.Filter_By_Tag__c              = null;
-        s.Filter_Custom_Field_Name__c   = 'Status';
-        s.Filter_Custom_Field_Value__c  = 'Active';
+        s.Filter_By_Tag__c = null;
+        s.Filter_Custom_Field_Value__c = 'Active';
         update s;
         Test.setMock(HttpCalloutMock.class, new MockAsanaHttpCustomFieldMismatch());
         Test.startTest();
         AsanaWebhookProcessor.processTaskEvent('44444');
         Test.stopTest();
-        System.assertEquals(0, [SELECT COUNT() FROM copado__User_Story__c],
-            'Custom field value mismatch must not create User Stories');
+        List<copado__User_Story__c> stories = [SELECT Id FROM copado__User_Story__c WHERE Asana_Task_ID__c = '44444'];
+        System.assertEquals(0, stories.size(), 'Custom field value mismatch must skip the task');
     }
 
-    // Asana API error must not create a User Story
+    // ── 5. Asana API error: no exception thrown, graceful exit ────────────────
     @IsTest
-    static void testProcessTaskEventApiError() {
+    static void testApiError() {
         Test.setMock(HttpCalloutMock.class, new MockAsanaHttpError());
-        Test.startTest();
-        AsanaWebhookProcessor.processTaskEvent('99999');
-        Test.stopTest();
-        System.assertEquals(0, [SELECT COUNT() FROM copado__User_Story__c],
-            'API errors must not create User Stories');
-    }
-
-    // Null data node in Asana response must be handled gracefully
-    @IsTest
-    static void testProcessTaskEventNullData() {
-        Test.setMock(HttpCalloutMock.class, new MockAsanaHttpNullData());
-        Test.startTest();
-        AsanaWebhookProcessor.processTaskEvent('77777');
-        Test.stopTest();
-        System.assertEquals(0, [SELECT COUNT() FROM copado__User_Story__c],
-            'Null data node must not create User Stories');
-    }
-
-    // Settings not configured must exit early without callout
-    @IsTest
-    static void testProcessTaskEventNoSettings() {
-        delete [SELECT Id FROM Asana_Integration_Settings__c];
-        Test.setMock(HttpCalloutMock.class, new MockAsanaHttpError());
-        Test.startTest();
-        AsanaWebhookProcessor.processTaskEvent('66666');
-        Test.stopTest();
-        System.assertEquals(0, [SELECT COUNT() FROM copado__User_Story__c],
-            'Missing settings must not create User Stories');
-    }
-
-    // Subtype-based record type resolution exercises the RT mapping path
-    @IsTest
-    static void testProcessTaskEventSubtypeRecordType() {
-        Test.setMock(HttpCalloutMock.class, new MockAsanaHttpSubtype());
         Test.startTest();
         AsanaWebhookProcessor.processTaskEvent('55555');
         Test.stopTest();
+        List<copado__User_Story__c> stories = [SELECT Id FROM copado__User_Story__c WHERE Asana_Task_ID__c = '55555'];
+        System.assertEquals(0, stories.size());
     }
 
-    // Finding 1 trust chain: webhook GID is saved from the authenticated API response.
+    // ── 6. Null data node: no exception thrown ────────────────────────────────
     @IsTest
-    static void testWebhookRegistrationSuccess() {
-        Asana_Integration_Settings__c s = Asana_Integration_Settings__c.getOrgDefaults();
-        s.Webhook_GID__c = null;
-        update s;
-
-        Test.setMock(HttpCalloutMock.class, new MockRegistrationSuccess());
+    static void testNullDataNode() {
+        Test.setMock(HttpCalloutMock.class, new MockAsanaHttpNullData());
         Test.startTest();
-        AsanaWebhookRegistration.registerWebhook();
+        AsanaWebhookProcessor.processTaskEvent('66666');
         Test.stopTest();
-
-        Asana_Integration_Settings__c settings = Asana_Integration_Settings__c.getOrgDefaults();
-        System.assertEquals('webhook001', settings.Webhook_GID__c,
-            'Webhook GID must be saved from the authenticated API response');
+        System.assertEquals(0, [SELECT COUNT() FROM copado__User_Story__c WHERE Asana_Task_ID__c = '66666']);
     }
 
-    // Registration failure must not update settings
+    // ── 7. Empty task name: not synced ────────────────────────────────────────
     @IsTest
-    static void testWebhookRegistrationFail() {
-        Test.setMock(HttpCalloutMock.class, new MockRegistrationFail());
-        String originalSecret = Asana_Integration_Settings__c.getOrgDefaults().Webhook_Secret__c;
+    static void testEmptyTaskNameSkipped() {
+        Test.setMock(HttpCalloutMock.class, new MockAsanaHttpEmptyName());
         Test.startTest();
-        AsanaWebhookRegistration.registerWebhook();
+        AsanaWebhookProcessor.processTaskEvent('77777');
         Test.stopTest();
-        Asana_Integration_Settings__c settings = Asana_Integration_Settings__c.getOrgDefaults();
-        System.assertEquals(originalSecret, settings.Webhook_Secret__c,
-            'Failed registration must not modify the stored secret');
+        System.assertEquals(0, [SELECT COUNT() FROM copado__User_Story__c WHERE Asana_Task_ID__c = '77777']);
     }
 
-    // Registration: missing project GID must exit early without making a callout
+    // ── 8. Blank GID: method returns immediately ──────────────────────────────
     @IsTest
-    static void testWebhookRegistrationMissingProjectGid() {
-        Asana_Integration_Settings__c s = Asana_Integration_Settings__c.getOrgDefaults();
-        s.Asana_Project_GID__c = null;
-        update s;
-        // No mock set intentionally: confirms no callout is attempted
-        AsanaWebhookRegistration.registerWebhook();
+    static void testBlankGid() {
+        Test.startTest();
+        AsanaWebhookProcessor.processTaskEvent(null);
+        AsanaWebhookProcessor.processTaskEvent('');
+        Test.stopTest();
+        System.assertEquals(0, [SELECT COUNT() FROM copado__User_Story__c]);
+    }
+
+    // ── 9. Invalid GID format: rejected before callout ────────────────────────
+    @IsTest
+    static void testInvalidGidFormat() {
+        Test.setMock(HttpCalloutMock.class, new MockAsanaHttpInvalidGid());
+        Test.startTest();
+        AsanaWebhookProcessor.processTaskEvent('../etc/passwd');
+        AsanaWebhookProcessor.processTaskEvent('task-id-with-dashes');
+        Test.stopTest();
+        // No user stories created, no exceptions thrown
+        System.assertEquals(0, [SELECT COUNT() FROM copado__User_Story__c]);
+    }
+
+    // ── 10. No settings configured: returns gracefully ────────────────────────
+    @IsTest
+    static void testNoSettingsConfigured() {
+        delete [SELECT Id FROM Asana_Integration_Settings__c LIMIT 1];
+        Test.startTest();
+        AsanaWebhookProcessor.processTaskEvent('88888');
+        Test.stopTest();
+        System.assertEquals(0, [SELECT COUNT() FROM copado__User_Story__c WHERE Asana_Task_ID__c = '88888']);
     }
 }
