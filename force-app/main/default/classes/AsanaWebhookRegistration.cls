@@ -7,42 +7,42 @@ public class AsanaWebhookRegistration {
             return;
         }
 
-        String asanaPAT   = settings.Asana_PAT__c;
         String projectGID = settings.Asana_Project_GID__c;
         String targetUrl  = 'https://copadopartnersuccess.my.salesforce-sites.com/AsanaIntegration/services/apexrest/asana/webhook';
 
-        Map<String, Object> dataMap = new Map<String, Object>{
-            'resource' => projectGID,
-            'target'   => targetUrl,
-            'filters'  => new List<Object>{
-                new Map<String, Object>{ 'resource_type' => 'task', 'action' => 'added' },
-                new Map<String, Object>{ 'resource_type' => 'task', 'action' => 'changed' }
-            }
-        };
+        Map<String, Object> dataMap = new Map<String, Object>();
+        dataMap.put('resource', projectGID);
+        dataMap.put('target', targetUrl);
+        dataMap.put('filters', new List<Map<String, Object>>{
+            new Map<String, Object>{ 'resource_type' => 'task', 'action' => 'added' },
+            new Map<String, Object>{ 'resource_type' => 'task', 'action' => 'changed' }
+        });
 
-        Map<String, Object> body = new Map<String, Object>{ 'data' => dataMap };
+        Map<String, Object> payload = new Map<String, Object>{ 'data' => dataMap };
 
+        // HIGH-01 FIX: Authorization header removed. Named Credential handles auth.
         HttpRequest req = new HttpRequest();
         req.setEndpoint('callout:AsanaCopado/api/1.0/webhooks');
         req.setMethod('POST');
-        req.setHeader('Authorization', 'Bearer ' + asanaPAT);
         req.setHeader('Content-Type', 'application/json');
-        req.setHeader('Accept', 'application/json');
-        req.setBody(JSON.serialize(body));
-        req.setTimeout(120000);
+        req.setBody(JSON.serialize(payload));
 
-        Http http = new Http();
-        HttpResponse res = http.send(req);
+        HttpResponse res = new Http().send(req);
+        if (res.getStatusCode() == 201) {
+            Map<String, Object> respBody = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
+            Map<String, Object> respData = (Map<String, Object>) respBody.get('data');
+            String webhookGid    = (String) respData.get('gid');
+            String webhookSecret = res.getHeader('X-Hook-Secret');
 
-        if (res.getStatusCode() == 201 || res.getStatusCode() == 200) {
-            Map<String, Object> respMap = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
-            Map<String, Object> data = (Map<String, Object>) respMap.get('data');
-            String webhookGid = data != null ? String.valueOf(data.get('gid')) : '';
-            settings.Webhook_GID__c = webhookGid;
-            update settings;
-            System.debug('AsanaWebhookRegistration: SUCCESS. Webhook GID saved = ' + webhookGid);
+            Asana_Integration_Settings__c upd = Asana_Integration_Settings__c.getOrgDefaults();
+            if (upd == null) { upd = new Asana_Integration_Settings__c(); }
+            upd.Webhook_GID__c    = webhookGid;
+            upd.Webhook_Secret__c = webhookSecret;
+            upsert upd;
+
+            System.debug('AsanaWebhookRegistration: Webhook registered. GID=' + webhookGid);
         } else {
-            System.debug('AsanaWebhookRegistration: FAILED - ' + res.getStatusCode() + ' ' + res.getBody());
+            System.debug('AsanaWebhookRegistration: Registration failed. Status=' + res.getStatusCode() + ' Body=' + res.getBody());
         }
     }
 }
