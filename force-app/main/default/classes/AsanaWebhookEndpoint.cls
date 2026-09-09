@@ -1,7 +1,15 @@
+/**
+ * AsanaWebhookEndpoint
+ *
+ * Security fixes applied:
+ *   HC-02  First-write-wins handshake – if a secret is already stored, the endpoint
+ *          returns HTTP 409 and rejects the overwrite, preventing secret hijacking.
+ *   LC-02  Debug log hygiene         – no full request/response bodies logged at INFO+.
+ */
 @RestResource(urlMapping='/asana/webhook/*')
 global with sharing class AsanaWebhookEndpoint {
 
-    // --- Inner class: elevates to System context for Custom Settings DML -------
+    // Inner class: elevates to System context for Custom Settings DML only.
     private without sharing class SettingsWriter {
         public void saveSecret(String secret) {
             Asana_Integration_Settings__c settings = Asana_Integration_Settings__c.getOrgDefaults();
@@ -16,16 +24,13 @@ global with sharing class AsanaWebhookEndpoint {
 
     /**
      * Constant-time HMAC-SHA256 comparison.
-     * Uses XOR accumulation across all character pairs so that execution time
-     * does not depend on the position of the first differing byte, preventing
-     * timing-based side-channel attacks (C-2 fix).
+     * XOR accumulation prevents timing-based side-channel attacks.
      */
     @TestVisible
     private static Boolean verifySignature(String secret, Blob body, String incoming) {
         if (String.isBlank(secret) || String.isBlank(incoming) || body == null) return false;
         Blob   hmac     = Crypto.generateMac('HmacSHA256', body, Blob.valueOf(secret));
         String computed = EncodingUtil.convertToHex(hmac);
-        // Length mismatch check (also constant-time safe: no character comparison done)
         if (computed.length() != incoming.length()) return false;
         Integer diff = 0;
         for (Integer i = 0; i < computed.length(); i++) {
@@ -40,9 +45,19 @@ global with sharing class AsanaWebhookEndpoint {
         RestResponse res = RestContext.response;
         res.statusCode = 200;
 
-        // Handshake: Asana sends X-Hook-Secret on first registration
+        // HC-02: Handshake branch — first-write-wins secret protection.
         String hookSecret = req.headers.get('X-Hook-Secret');
         if (String.isNotBlank(hookSecret)) {
+            Asana_Integration_Settings__c existingSettings = Asana_Integration_Settings__c.getOrgDefaults();
+            // If a secret is already stored, reject the overwrite attempt.
+            if (existingSettings != null && String.isNotBlank(existingSettings.Webhook_Secret__c)) {
+                System.debug(LoggingLevel.WARN,
+                    'AsanaWebhookEndpoint: Handshake rejected — secret already configured. Returning 409.');
+                res.statusCode   = 409;
+                res.responseBody = Blob.valueOf('{"error":"Webhook secret already registered. Reset via admin tools before re-registering."}');
+                return;
+            }
+            // First registration: accept and store the secret.
             new SettingsWriter().saveSecret(hookSecret);
             res.addHeader('X-Hook-Secret', hookSecret);
             return;
@@ -55,7 +70,7 @@ global with sharing class AsanaWebhookEndpoint {
         Asana_Integration_Settings__c settings = Asana_Integration_Settings__c.getOrgDefaults();
         String storedSecret = settings != null ? settings.Webhook_Secret__c : null;
 
-        // HMAC gate: always active, no Test.isRunningTest() bypass (C-1 fix)
+        // HMAC gate: always active, no Test.isRunningTest() bypass.
         if (!verifySignature(storedSecret, req.requestBody, incomingSignature)) {
             res.statusCode   = 401;
             res.responseBody = Blob.valueOf('{"error":"Invalid signature"}');
@@ -66,7 +81,7 @@ global with sharing class AsanaWebhookEndpoint {
         try {
             payload = (Map<String, Object>) JSON.deserializeUntyped(bodyStr);
         } catch (Exception e) {
-            System.debug(LoggingLevel.ERROR, 'AsanaWebhookEndpoint: JSON parse error - ' + e.getMessage());
+            System.debug(LoggingLevel.ERROR, 'AsanaWebhookEndpoint: JSON parse error.');
             return;
         }
 
@@ -93,6 +108,13 @@ global with sharing class AsanaWebhookEndpoint {
 
         if (taskGidsToProcess.isEmpty()) return;
 
-        System.enqueueJob(new AsanaWebhookQueueable(taskGidsToProcess));
+        // LC-03: Enqueue in batches of 15 to stay well within Asana rate limits.
+        List<String> gidList = new List<String>(taskGidsToProcess);
+        Integer batchSize = 15;
+        for (Integer i = 0; i < gidList.size(); i += batchSize) {
+            Integer endIdx = Math.min(i + batchSize, gidList.size());
+            Set<String> batch = new Set<String>(gidList.subList(i, endIdx));
+            System.enqueueJob(new AsanaWebhookQueueable(batch));
+        }
     }
 }
