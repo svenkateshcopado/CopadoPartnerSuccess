@@ -15,56 +15,78 @@ public class AsanaDiagnostic {
     }
 
     public static void runLive() {
+        // STEP 1: Custom Setting check
         Asana_Integration_Settings__c settings = Asana_Integration_Settings__c.getOrgDefaults();
         if (settings == null) {
-            System.debug('### DIAG [FAIL] Custom Setting record does not exist.');
+            System.debug('### DIAG [FAIL] Custom Setting record does not exist. Go to Setup > Custom Settings > Asana Integration Settings > Manage > New.');
             return;
         }
 
-        Boolean patOk = String.isNotBlank(settings.Asana_PAT__c);
+        // MEDIUM-04 FIX: Asana_PAT__c is never read, checked, or logged.
+        // Named Credential 'AsanaCopado' handles authentication transparently.
+        // The old 'patOk' guard that blocked diagnostics when PAT was absent is removed.
         Boolean gidOk = String.isNotBlank(settings.Asana_Project_GID__c);
         Boolean tagF  = String.isNotBlank(settings.Filter_By_Tag__c);
-        Boolean cfF   = String.isNotBlank(settings.Filter_Custom_Field_Name__c) && String.isNotBlank(settings.Filter_Custom_Field_Value__c);
+        Boolean cfF   = String.isNotBlank(settings.Filter_Custom_Field_Name__c)
+                        && String.isNotBlank(settings.Filter_Custom_Field_Value__c);
 
-        System.debug('### DIAG [PAT configured]         : ' + patOk);
         System.debug('### DIAG [Project GID configured] : ' + gidOk);
-        System.debug('### DIAG [Project GID value]      : ' + (gidOk ? settings.Asana_Project_GID__c : 'EMPTY'));
+        System.debug('### DIAG [Project GID value]      : ' + (gidOk ? settings.Asana_Project_GID__c : 'EMPTY - SYNC WILL NOT RUN'));
         System.debug('### DIAG [Tag filter active]      : ' + tagF + (tagF ? ' | value = ' + settings.Filter_By_Tag__c : ' | all tasks allowed'));
-        System.debug('### DIAG [Custom field filter]    : ' + cfF);
+        System.debug('### DIAG [Custom field filter]    : ' + cfF + (cfF ? ' | ' + settings.Filter_Custom_Field_Name__c + ' = ' + settings.Filter_Custom_Field_Value__c : ' | no custom field filter'));
+        System.debug('### DIAG [Auth]                   : Named Credential AsanaCopado (PAT secured - not exposed in diagnostics)');
 
-        if (!patOk || !gidOk) { System.debug('### DIAG [FAIL] PAT or GID missing.'); return; }
+        if (!gidOk) {
+            System.debug('### DIAG [FAIL] Cannot proceed. Project GID missing in Custom Setting.');
+            return;
+        }
 
-        List<Asana_Field_Mapping__mdt> fms = [SELECT MasterLabel, Asana_Field_API_Name__c, Copado_Field_API_Name__c, Direction__c FROM Asana_Field_Mapping__mdt WHERE Is_Active__c = true AND (Direction__c = 'Inbound' OR Direction__c = 'Both')];
-        System.debug('### DIAG [Inbound field mappings] : ' + fms.size());
-        for (Asana_Field_Mapping__mdt m : fms) System.debug('### DIAG   >> ' + m.MasterLabel + ' | ' + m.Asana_Field_API_Name__c + ' --> ' + m.Copado_Field_API_Name__c);
+        // STEP 2: Field mappings
+        List<Asana_Field_Mapping__mdt> fms = [
+            SELECT MasterLabel, Asana_Field_API_Name__c, Copado_Field_API_Name__c, Direction__c
+            FROM Asana_Field_Mapping__mdt
+            WHERE Is_Active__c = true AND (Direction__c = 'Inbound' OR Direction__c = 'Both')
+        ];
+        System.debug('### DIAG [Inbound field mappings active] : ' + fms.size());
+        for (Asana_Field_Mapping__mdt m : fms) {
+            System.debug('### DIAG   >> ' + m.MasterLabel + ' | ' + m.Asana_Field_API_Name__c + ' --> ' + m.Copado_Field_API_Name__c);
+        }
 
-        List<Asana_Record_Type_Mapping__mdt> rms = [SELECT MasterLabel, Asana_Task_Value__c, Copado_Record_Type_Developer_Name__c, Is_Default__c FROM Asana_Record_Type_Mapping__mdt WHERE Is_Active__c = true];
-        System.debug('### DIAG [Record type mappings]   : ' + rms.size());
-        for (Asana_Record_Type_Mapping__mdt r : rms) System.debug('### DIAG   >> ' + r.MasterLabel + ' | ' + r.Asana_Task_Value__c + ' --> ' + r.Copado_Record_Type_Developer_Name__c + ' | default=' + r.Is_Default__c);
+        // STEP 3: Record type mappings
+        List<Asana_Record_Type_Mapping__mdt> rms = [
+            SELECT MasterLabel, Asana_Task_Value__c, Copado_Record_Type_Developer_Name__c, Is_Default__c
+            FROM Asana_Record_Type_Mapping__mdt
+            WHERE Is_Active__c = true
+        ];
+        System.debug('### DIAG [Record type mappings active]  : ' + rms.size());
+        for (Asana_Record_Type_Mapping__mdt r : rms) {
+            System.debug('### DIAG   >> ' + r.MasterLabel + ' | ' + r.Asana_Task_Value__c + ' --> ' + r.Copado_Record_Type_Developer_Name__c + ' | default=' + r.Is_Default__c);
+        }
 
+        // STEP 4: Copado User Story Record Types
         List<RecordType> rts = [SELECT Id, DeveloperName FROM RecordType WHERE SObjectType = 'copado__User_Story__c'];
-        System.debug('### DIAG [Copado User Story RTs]  : ' + rts.size());
-        for (RecordType rt : rts) System.debug('### DIAG   RT >> ' + rt.DeveloperName + ' | ' + rt.Id);
+        System.debug('### DIAG [Copado User Story RTs]        : ' + rts.size());
+        for (RecordType rt : rts) {
+            System.debug('### DIAG   RT >> ' + rt.DeveloperName + ' | ' + rt.Id);
+        }
 
+        // STEP 5: Live API connectivity test
         HttpRequest req = new HttpRequest();
-        req.setEndpoint('callout:AsanaCopado/api/1.0/projects/' + settings.Asana_Project_GID__c + '/tasks?opt_fields=gid,name&limit=5');
+        req.setEndpoint('callout:AsanaCopado/api/1.0/projects/' + settings.Asana_Project_GID__c + '/tasks?opt_fields=gid,name&limit=1');
         req.setMethod('GET');
-        req.setHeader('Authorization', 'Bearer ' + settings.Asana_PAT__c);
         req.setHeader('Accept', 'application/json');
-        req.setTimeout(30000);
+        req.setTimeout(10000);
 
         try {
             HttpResponse res = new Http().send(req);
-            System.debug('### DIAG [Asana API status] : ' + res.getStatusCode());
+            System.debug('### DIAG [API connectivity]           : HTTP ' + res.getStatusCode());
             if (res.getStatusCode() == 200) {
-                Map<String, Object> body = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
-                List<Object> tasks = (List<Object>) body.get('data');
-                System.debug('### DIAG [Tasks returned]  : ' + (tasks != null ? tasks.size() : 0));
+                System.debug('### DIAG [PASS] Named Credential auth successful. API reachable.');
             } else {
-                System.debug('### DIAG [FAIL] API error: ' + res.getStatusCode() + ' ' + res.getBody());
+                System.debug('### DIAG [WARN] Unexpected status. Body: ' + res.getBody());
             }
-        } catch(Exception e) {
-            System.debug('### DIAG [FAIL] Callout exception: ' + e.getMessage());
+        } catch (Exception e) {
+            System.debug('### DIAG [FAIL] API call threw exception: ' + e.getMessage());
         }
     }
 }

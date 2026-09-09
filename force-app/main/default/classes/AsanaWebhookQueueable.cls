@@ -2,7 +2,7 @@ public class AsanaWebhookQueueable implements Queueable, Database.AllowsCallouts
 
     private Set<String> taskGids;
 
-    // ── New constructor: accepts a full Set of GIDs ───────────────────────────
+    // New constructor: accepts a full Set of GIDs
     public AsanaWebhookQueueable(Set<String> taskGids) {
         this.taskGids = taskGids;
     }
