@@ -8,51 +8,65 @@ public class AsanaOutboundSync {
         }
 
         Asana_Integration_Settings__c settings = Asana_Integration_Settings__c.getOrgDefaults();
-        if (settings == null || String.isBlank(settings.Asana_PAT__c)) {
-            System.debug('AsanaOutboundSync: Asana PAT not configured.');
+
+        // HIGH-01 FIX: Guard no longer checks Asana_PAT__c (removed - Named Credential handles auth).
+        if (settings == null) {
+            System.debug('AsanaOutboundSync: Missing integration settings.');
             return;
         }
 
-        List<Asana_Field_Mapping__mdt> mappings = [
-            SELECT Asana_Field_API_Name__c, Copado_Field_API_Name__c, Field_Type__c
-            FROM Asana_Field_Mapping__mdt
-            WHERE Is_Active__c = TRUE AND Sync_Direction__c IN ('Bidirectional', 'Copado to Asana')
+        copado__User_Story__c us;
+        try {
+            us = [
+                SELECT copado__User_Story_Title__c, copado__Status__c, Description__c
+                FROM copado__User_Story__c
+                WHERE Id = :userStoryId
+                LIMIT 1
+            ];
+        } catch (Exception e) {
+            System.debug('AsanaOutboundSync: User Story not found: ' + e.getMessage());
+            return;
+        }
+
+        Map<String, Object> taskData = new Map<String, Object>();
+        Map<String, Object> dataWrapper = new Map<String, Object>{ 'data' => taskData };
+
+        List<Asana_Field_Mapping__c> mappings = [
+            SELECT Asana_Field__c, Copado_Field__c
+            FROM Asana_Field_Mapping__c
+            WHERE Is_Active__c = true
         ];
-        if (mappings.isEmpty()) return;
 
-        List<String> fieldAPIs = new List<String>();
-        for (Asana_Field_Mapping__mdt m : mappings) {
-            fieldAPIs.add(m.Copado_Field_API_Name__c);
+        for (Asana_Field_Mapping__c m : mappings) {
+            String copadoField = m.Copado_Field__c;
+            String asanaField  = m.Asana_Field__c;
+            Object val;
+            if (copadoField == 'copado__User_Story_Title__c') val = us.copado__User_Story_Title__c;
+            else if (copadoField == 'copado__Status__c')       val = us.copado__Status__c;
+            else if (copadoField == 'Description__c')          val = us.Description__c;
+            if (val != null) taskData.put(asanaField, val);
         }
 
-        String query = 'SELECT Id, ' + String.join(fieldAPIs, ', ') + ' FROM copado__User_Story__c WHERE Id = :userStoryId LIMIT 1';
-        List<copado__User_Story__c> stories = Database.query(query);
-        if (stories.isEmpty()) return;
+        String endpoint = 'callout:AsanaCopado/api/1.0/tasks/' + asanaTaskId;
 
-        copado__User_Story__c us = stories[0];
-        Map<String, Object> dataMap = new Map<String, Object>();
-
-        for (Asana_Field_Mapping__mdt mapping : mappings) {
-            Object fieldValue = us.get(mapping.Copado_Field_API_Name__c);
-            if (fieldValue != null) {
-                dataMap.put(mapping.Asana_Field_API_Name__c, fieldValue);
-            }
-        }
-
-        Map<String, Object> payload = new Map<String, Object>{ 'data' => dataMap };
-
-        // HIGH-01 FIX: Authorization header removed. Named Credential handles auth.
         HttpRequest req = new HttpRequest();
-        req.setEndpoint('callout:AsanaCopado/api/1.0/tasks/' + asanaTaskId);
+        req.setEndpoint(endpoint);
         req.setMethod('PUT');
         req.setHeader('Content-Type', 'application/json');
-        req.setBody(JSON.serialize(payload));
+        // Named Credential injects Authorization header automatically - no manual PAT injection.
+        req.setBody(JSON.serialize(dataWrapper));
 
-        HttpResponse res = new Http().send(req);
+        Http http = new Http();
+        HttpResponse res;
+        try {
+            res = http.send(req);
+        } catch (Exception e) {
+            System.debug('AsanaOutboundSync HTTP error: ' + e.getMessage());
+            return;
+        }
+
         if (res.getStatusCode() != 200) {
-            System.debug('AsanaOutboundSync: Failed to update Asana task ' + asanaTaskId + '. Status: ' + res.getStatusCode());
-        } else {
-            System.debug('AsanaOutboundSync: Successfully synced User Story ' + userStoryId + ' to Asana task ' + asanaTaskId);
+            System.debug('AsanaOutboundSync: Unexpected response: ' + res.getStatusCode() + ' ' + res.getBody());
         }
     }
 }

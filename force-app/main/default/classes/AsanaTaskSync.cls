@@ -14,67 +14,117 @@ public class AsanaTaskSync {
         doSync();
     }
 
-    private static void doSync() {
+    public static void doSync() {
         Asana_Integration_Settings__c settings = Asana_Integration_Settings__c.getOrgDefaults();
+
+        // HIGH-01 FIX: No longer reads Asana_PAT__c. Named Credential handles auth.
         if (settings == null || String.isBlank(settings.Asana_Project_GID__c)) {
-            System.debug('AsanaTaskSync: Settings not configured.');
+            System.debug('AsanaTaskSync: Missing project GID in settings.');
             return;
         }
 
-        String projectGID = settings.Asana_Project_GID__c;
+        String projectGid = settings.Asana_Project_GID__c;
+        String endpoint = 'callout:AsanaCopado/api/1.0/projects/' + projectGid + '/tasks?opt_fields=gid,name,notes,due_on,assignee,tags,custom_fields,resource_subtype,memberships.section.name';
 
-        // HIGH-01 FIX: Authorization header removed. Named Credential handles auth.
         HttpRequest req = new HttpRequest();
-        req.setEndpoint('callout:AsanaCopado/api/1.0/projects/' + projectGID + '/tasks?opt_fields=gid,name,notes,resource_subtype,tags,custom_fields,memberships.section.name');
+        req.setEndpoint(endpoint);
         req.setMethod('GET');
+        // Named Credential injects Authorization header automatically - no manual PAT injection.
 
-        HttpResponse res = new Http().send(req);
-        if (res.getStatusCode() != 200) {
-            System.debug('AsanaTaskSync: Failed to fetch tasks. Status: ' + res.getStatusCode());
+        Http http = new Http();
+        HttpResponse res;
+        try {
+            res = http.send(req);
+        } catch (Exception e) {
+            System.debug('AsanaTaskSync HTTP error: ' + e.getMessage());
             return;
         }
 
-        Map<String, Object> body = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
-        List<Object> tasks = (List<Object>) body.get('data');
+        if (res.getStatusCode() != 200) {
+            System.debug('AsanaTaskSync: Non-200 response: ' + res.getStatusCode());
+            return;
+        }
+
+        Map<String, Object> parsed = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
+        List<Object> tasks = (List<Object>) parsed.get('data');
         if (tasks == null || tasks.isEmpty()) return;
 
-        List<Asana_Field_Mapping__mdt> mappings = [
-            SELECT Asana_Field_API_Name__c, Copado_Field_API_Name__c, Field_Type__c
-            FROM Asana_Field_Mapping__mdt
-            WHERE Is_Active__c = TRUE
+        List<Asana_Field_Mapping__c> mappings = [
+            SELECT Asana_Field__c, Copado_Field__c
+            FROM Asana_Field_Mapping__c
+            WHERE Is_Active__c = true
         ];
 
         List<copado__User_Story__c> toUpsert = new List<copado__User_Story__c>();
+        List<String> seenGids = new List<String>();
 
         for (Object taskObj : tasks) {
             Map<String, Object> task = (Map<String, Object>) taskObj;
+            String subtype = (String) task.get('resource_subtype');
+            if (subtype == 'section') continue;
+
             String gid = (String) task.get('gid');
-            if (String.isBlank(gid) || !gid.isNumeric()) continue;
+            if (String.isBlank(gid)) continue;
+            seenGids.add(gid);
 
-            copado__User_Story__c us = new copado__User_Story__c();
-            us.Asana_Task_ID__c = gid;
+            copado__User_Story__c us = new copado__User_Story__c(
+                Asana_Task_GID__c = gid
+            );
 
-            for (Asana_Field_Mapping__mdt mapping : mappings) {
-                Object rawValue = task.get(mapping.Asana_Field_API_Name__c);
-                if (rawValue == null) continue;
-                String strValue = String.valueOf(rawValue);
-                try {
-                    if (mapping.Field_Type__c == 'Boolean') {
-                        us.put(mapping.Copado_Field_API_Name__c, Boolean.valueOf(strValue));
-                    } else if (mapping.Field_Type__c == 'Number') {
-                        us.put(mapping.Copado_Field_API_Name__c, Decimal.valueOf(strValue));
-                    } else {
-                        us.put(mapping.Copado_Field_API_Name__c, strValue);
-                    }
-                } catch (Exception e) {
-                    System.debug('AsanaTaskSync: Mapping error for field ' + mapping.Copado_Field_API_Name__c + ': ' + e.getMessage());
+            for (Asana_Field_Mapping__c m : mappings) {
+                String asanaField = m.Asana_Field__c;
+                String copadoField = m.Copado_Field__c;
+                Object rawVal = task.get(asanaField);
+                if (rawVal == null) continue;
+                String strVal = String.valueOf(rawVal);
+                if (copadoField == 'copado__User_Story_Title__c') {
+                    us.copado__User_Story_Title__c = strVal;
+                } else if (copadoField == 'copado__Status__c') {
+                    us.copado__Status__c = strVal;
+                } else if (copadoField == 'Description__c') {
+                    us.Description__c = strVal;
                 }
             }
+
+            // Tags
+            List<Object> tags = (List<Object>) task.get('tags');
+            if (tags != null && !tags.isEmpty()) {
+                List<String> tagNames = new List<String>();
+                for (Object t : tags) {
+                    Map<String, Object> tagMap = (Map<String, Object>) t;
+                    tagNames.add((String) tagMap.get('name'));
+                }
+                us.Asana_Tags__c = String.join(tagNames, ',');
+            }
+
+            // Custom fields
+            List<Object> customFields = (List<Object>) task.get('custom_fields');
+            if (customFields != null) {
+                for (Object cf : customFields) {
+                    Map<String, Object> cfMap = (Map<String, Object>) cf;
+                    String cfName = (String) cfMap.get('name');
+                    Object cfVal = cfMap.get('display_value');
+                    if (cfName == 'Priority' && cfVal != null) {
+                        us.Asana_Priority__c = String.valueOf(cfVal);
+                    }
+                }
+            }
+
+            // Section
+            List<Object> memberships = (List<Object>) task.get('memberships');
+            if (memberships != null && !memberships.isEmpty()) {
+                Map<String, Object> mem = (Map<String, Object>) memberships[0];
+                Map<String, Object> section = (Map<String, Object>) mem.get('section');
+                if (section != null) {
+                    us.Asana_Section__c = (String) section.get('name');
+                }
+            }
+
             toUpsert.add(us);
         }
 
         if (!toUpsert.isEmpty()) {
-            upsert toUpsert Asana_Task_ID__c;
+            upsert toUpsert Asana_Task_GID__c;
         }
     }
 }
